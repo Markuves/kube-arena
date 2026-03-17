@@ -1,0 +1,6 @@
+clusterName: ks-arena-cluster
+# kubeconfigPath se puede omitir para usar el kubeconfig por defecto de KIND dentro de la imagen.
+testConfigPath: clusterloader2-config.yaml
+repeat: 1
+timeoutSeconds: 1800
+

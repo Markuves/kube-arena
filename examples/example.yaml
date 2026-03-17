@@ -1,0 +1,7 @@
+kindConfigPath: kind-config.yaml
+clusterName: ks-arena-cluster
+terraformDir: terraform
+variables:
+  namespace: "perf-tests"
+  replicas: "3"
+

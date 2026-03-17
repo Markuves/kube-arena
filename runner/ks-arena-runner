@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cmd="${1:-}"
+shift || true
+
+log() { echo "ks-arena-runner: $*" >&2; }
+
+ensure_tools() {
+  command -v kind >/dev/null
+  command -v kubectl >/dev/null
+  command -v terraform >/dev/null
+  command -v clusterloader2 >/dev/null
+}
+
+kind_up() {
+  local cluster_name=""
+  local kind_config=""
+  local terraform_dir=""
+  local config_yaml=""
+  local vars=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cluster-name) cluster_name="$2"; shift 2;;
+      --kind-config) kind_config="$2"; shift 2;;
+      --terraform-dir) terraform_dir="$2"; shift 2;;
+      --config-yaml) config_yaml="$2"; shift 2;;
+      --var) vars+=("$2"); shift 2;;
+      *) log "argumento desconocido: $1"; exit 2;;
+    esac
+  done
+
+  [[ -n "$cluster_name" ]] || { log "--cluster-name es obligatorio"; exit 2; }
+  [[ -n "$terraform_dir" ]] || { log "--terraform-dir es obligatorio"; exit 2; }
+
+  ensure_tools
+
+  # KIND necesita tiempo suficiente para bootstrapping (kubeadm/kubelet puede tardar).
+  local kind_args=(create cluster --name "$cluster_name" --wait "10m")
+  if [[ -n "$kind_config" ]]; then
+    kind_args+=(--config "/workspace/$kind_config")
+  fi
+
+  log "Creando/actualizando cluster KIND: $cluster_name"
+  kind "${kind_args[@]}"
+
+  log "Exportando kubeconfig a /workspace/kubeconfig"
+  kind get kubeconfig --name "$cluster_name" > /workspace/kubeconfig
+  export KUBECONFIG=/workspace/kubeconfig
+
+  log "Esperando a que el cluster responda..."
+  for _ in $(seq 1 60); do
+    if kubectl cluster-info >/dev/null 2>&1; then
+      break
+    fi
+    sleep 2
+  done
+
+  log "Inicializando y aplicando Terraform en /workspace/$terraform_dir"
+  terraform -chdir="/workspace/$terraform_dir" init -input=false
+
+  tf_apply=(terraform -chdir="/workspace/$terraform_dir" apply -auto-approve -input=false)
+  for kv in "${vars[@]:-}"; do
+    tf_apply+=(-var "$kv")
+  done
+
+  "${tf_apply[@]}"
+
+  log "OK"
+}
+
+kind_down() {
+  local cluster_name=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cluster-name) cluster_name="$2"; shift 2;;
+      *) log "argumento desconocido: $1"; exit 2;;
+    esac
+  done
+
+  [[ -n "$cluster_name" ]] || { log "--cluster-name es obligatorio"; exit 2; }
+
+  ensure_tools
+
+  log "Eliminando cluster KIND: $cluster_name"
+  kind delete cluster --name "$cluster_name"
+  log "OK"
+}
+
+scheduler_apply() {
+  local cluster_name=""
+  local manifest=""
+  local kubeconfig_path="/workspace/kubeconfig"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cluster-name) cluster_name="$2"; shift 2;;
+      --manifest) manifest="/workspace/$2"; shift 2;;
+      --kubeconfig) kubeconfig_path="/workspace/$2"; shift 2;;
+      *) log "argumento desconocido: $1"; exit 2;;
+    esac
+  done
+
+  [[ -n "$cluster_name" ]] || { log "--cluster-name es obligatorio"; exit 2; }
+  [[ -n "$manifest" ]] || { log "--manifest es obligatorio"; exit 2; }
+
+  ensure_tools
+
+  if [[ ! -f "$kubeconfig_path" ]]; then
+    log "No existe kubeconfig en $kubeconfig_path. Ejecuta primero: ks-arena kind ..."
+    exit 2
+  fi
+
+  export KUBECONFIG="$kubeconfig_path"
+  log "Aplicando manifest de scheduler personalizado: $manifest"
+  kubectl apply -f "$manifest"
+  log "OK"
+}
+run_test() {
+  local cluster_name=""
+  local kubeconfig_path="/workspace/kubeconfig"
+  local test_config=""
+  local repeat="1"
+  local timeout_seconds=""
+  local verbose="false"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cluster-name) cluster_name="$2"; shift 2;;
+      --kubeconfig) kubeconfig_path="/workspace/$2"; shift 2;;
+      --test-config) test_config="/workspace/$2"; shift 2;;
+      --repeat) repeat="$2"; shift 2;;
+      --timeout-seconds) timeout_seconds="$2"; shift 2;;
+      --verbose) verbose="true"; shift 1;;
+      --config-yaml) shift 2;; # solo para trazabilidad (no se usa)
+      *) log "argumento desconocido: $1"; exit 2;;
+    esac
+  done
+
+  [[ -n "$cluster_name" ]] || { log "--cluster-name es obligatorio"; exit 2; }
+  [[ -n "$test_config" ]] || { log "--test-config es obligatorio"; exit 2; }
+
+  ensure_tools
+
+  if [[ ! -f "$kubeconfig_path" ]]; then
+    log "No existe kubeconfig en $kubeconfig_path. Ejecuta primero: ks-arena kind ..."
+    exit 2
+  fi
+
+  local cl_args=(--kubeconfig "$kubeconfig_path" --testconfig "$test_config")
+  if [[ -n "$timeout_seconds" ]]; then
+    cl_args+=(--timeout "${timeout_seconds}s")
+  fi
+
+  log "Ejecutando ClusterLoader2 (repeat=$repeat)..."
+  for i in $(seq 1 "$repeat"); do
+    log "Run $i/$repeat"
+    if [[ "$verbose" == "true" ]]; then
+      clusterloader2 "${cl_args[@]}"
+    else
+      clusterloader2 "${cl_args[@]}" 2>&1 | tee "/workspace/clusterloader2-run-${i}.log"
+    fi
+  done
+
+  log "OK"
+}
+
+case "$cmd" in
+  kind) kind_up "$@";;
+  down) kind_down "$@";;
+  scheduler) scheduler_apply "$@";;
+  test) run_test "$@";;
+  ""|-h|--help|help)
+    cat <<'EOF'
+ks-arena-runner (internal)
+
+Commands:
+  kind  --cluster-name NAME [--kind-config PATH] --terraform-dir DIR [--var k=v ...]
+  test  --cluster-name NAME [--kubeconfig PATH] --test-config PATH [--repeat N] [--timeout-seconds N] [--verbose]
+EOF
+    ;;
+  *)
+    log "comando desconocido: $cmd"
+    exit 2
+    ;;
+esac
+

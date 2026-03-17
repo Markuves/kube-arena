@@ -1,0 +1,5 @@
+clusterName: ks-arena-cluster
+schedulerDir: ./scheduler
+image: ks-arena-scheduler:local
+manifestPath: scheduler-deployment.yaml
+
