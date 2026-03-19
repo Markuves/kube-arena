@@ -227,6 +227,44 @@ print_test_report() {
     done <<< "$test_namespaces"
 
     log ""
+    log ""
+    log "--- Pod startup latency (pod created → main container running) ---"
+    local latency_tmp="/tmp/_pod_latencies_$$.txt"
+    : > "$latency_tmp"
+    while IFS= read -r ns; do
+      local jsonpath='{range .items[*]}{.metadata.creationTimestamp}{"\t"}{.status.containerStatuses[0].state.running.startedAt}{"\n"}{end}'
+      local pod_ts
+      pod_ts=$(kubectl get pods -n "$ns" -l app=drs-test-pod \
+        -o jsonpath="$jsonpath" 2>/dev/null) || continue
+      [[ -z "$pod_ts" ]] && continue
+      while IFS=$'\t' read -r created started; do
+        [[ -z "$created" || -z "$started" ]] && continue
+        local t0 t1
+        t0=$(date -d "$created" +%s 2>/dev/null) || continue
+        t1=$(date -d "$started"  +%s 2>/dev/null) || continue
+        echo $(( t1 - t0 )) >> "$latency_tmp"
+      done <<< "$pod_ts"
+    done <<< "$test_namespaces"
+    if [[ -s "$latency_tmp" ]]; then
+      sort -n "$latency_tmp" | awk '
+        BEGIN{n=0}
+        {a[n++]=$1}
+        END{
+          if(n==0){print "  No data";exit}
+          printf "  Samples: %d  P50: %ds  P90: %ds  P99: %ds  Max: %ds  Min: %ds\n",
+            n,
+            a[int(n*0.50)],
+            a[int(n*0.90)],
+            a[int(n*0.99 < n ? n*0.99 : n-1)],
+            a[n-1],
+            a[0]
+        }'
+      rm -f "$latency_tmp"
+    else
+      log "  No latency data (pods already exited or no containerStatus yet)."
+    fi
+
+    log ""
     # Cleanup test namespaces
     log "Limpiando namespaces de prueba..."
     while IFS= read -r ns; do
@@ -294,11 +332,13 @@ run_test() {
   fi
 
   # Keep test namespaces alive after CL2 finishes so the report can inspect them.
-  # deleteAutomanagedNamespaces=false is set in the test config itself.
+  # CL2 ignores deleteAutomanagedNamespaces from the testconfig file, so we use
+  # the CLI flag (it shows a deprecation warning but still works correctly).
   local cl_args=(
     --kubeconfig "$kubeconfig_path"
     --testconfig "$test_config"
     --provider=kind
+    --delete-automanaged-namespaces=false
   )
 
   log "Ejecutando ClusterLoader2 (repeat=$repeat)..."
