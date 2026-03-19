@@ -9,7 +9,15 @@ log() { echo "ks-arena-runner: $*" >&2; }
 ensure_tools() {
   command -v kind >/dev/null
   command -v kubectl >/dev/null
+}
+
+ensure_tools_terraform() {
+  ensure_tools
   command -v terraform >/dev/null
+}
+
+ensure_tools_test() {
+  ensure_tools
   command -v clusterloader2 >/dev/null
 }
 
@@ -19,30 +27,33 @@ kind_up() {
   local terraform_dir=""
   local config_yaml=""
   local vars=()
+  local images=()
+  local manifests=()
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --cluster-name) cluster_name="$2"; shift 2;;
-      --kind-config) kind_config="$2"; shift 2;;
+      --cluster-name)  cluster_name="$2"; shift 2;;
+      --kind-config)   kind_config="$2"; shift 2;;
       --terraform-dir) terraform_dir="$2"; shift 2;;
-      --config-yaml) config_yaml="$2"; shift 2;;
-      --var) vars+=("$2"); shift 2;;
+      --config-yaml)   config_yaml="$2"; shift 2;;
+      --var)           vars+=("$2"); shift 2;;
+      --image)         images+=("$2"); shift 2;;
+      --manifest)      manifests+=("$2"); shift 2;;
       *) log "argumento desconocido: $1"; exit 2;;
     esac
   done
 
   [[ -n "$cluster_name" ]] || { log "--cluster-name es obligatorio"; exit 2; }
-  [[ -n "$terraform_dir" ]] || { log "--terraform-dir es obligatorio"; exit 2; }
 
   ensure_tools
 
-  # KIND necesita tiempo suficiente para bootstrapping (kubeadm/kubelet puede tardar).
+  # Create KIND cluster
   local kind_args=(create cluster --name "$cluster_name" --wait "10m")
   if [[ -n "$kind_config" ]]; then
     kind_args+=(--config "/workspace/$kind_config")
   fi
 
-  log "Creando/actualizando cluster KIND: $cluster_name"
+  log "Creando cluster KIND: $cluster_name"
   kind "${kind_args[@]}"
 
   log "Exportando kubeconfig a /workspace/kubeconfig"
@@ -57,15 +68,39 @@ kind_up() {
     sleep 2
   done
 
-  log "Inicializando y aplicando Terraform en /workspace/$terraform_dir"
-  terraform -chdir="/workspace/$terraform_dir" init -input=false
-
-  tf_apply=(terraform -chdir="/workspace/$terraform_dir" apply -auto-approve -input=false)
-  for kv in "${vars[@]:-}"; do
-    tf_apply+=(-var "$kv")
+  # Load images into KIND (they must already exist in the host Docker daemon)
+  for img in "${images[@]:-}"; do
+    [[ -n "$img" ]] || continue
+    log "Cargando imagen en KIND: $img"
+    kind load docker-image "$img" --name "$cluster_name"
   done
 
-  "${tf_apply[@]}"
+  # Run Terraform if a terraform directory was provided
+  if [[ -n "$terraform_dir" ]]; then
+    ensure_tools_terraform
+    log "Inicializando y aplicando Terraform en /workspace/$terraform_dir"
+    terraform -chdir="/workspace/$terraform_dir" init -input=false
+
+    tf_apply=(terraform -chdir="/workspace/$terraform_dir" apply -auto-approve -input=false)
+    for kv in "${vars[@]:-}"; do
+      tf_apply+=(-var "$kv")
+    done
+    "${tf_apply[@]}"
+  fi
+
+  # Apply manifests
+  for manifest in "${manifests[@]:-}"; do
+    [[ -n "$manifest" ]] || continue
+    log "Aplicando manifest: $manifest"
+    kubectl apply -f "/workspace/$manifest"
+  done
+
+  # Wait for pods in all namespaces to be ready (best-effort, don't fail the whole command)
+  if [[ ${#manifests[@]} -gt 0 ]]; then
+    log "Esperando a que los pods estén listos (timeout 3m)..."
+    kubectl wait pod --all --all-namespaces --for=condition=ready --timeout=180s 2>/dev/null || \
+      log "Algunos pods aún no están listos (pueden inicializarse más tarde)."
+  fi
 
   log "OK"
 }
@@ -92,19 +127,21 @@ kind_down() {
 scheduler_apply() {
   local cluster_name=""
   local manifest=""
+  local scheduler_image=""
   local kubeconfig_path="/workspace/kubeconfig"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --cluster-name) cluster_name="$2"; shift 2;;
-      --manifest) manifest="/workspace/$2"; shift 2;;
-      --kubeconfig) kubeconfig_path="/workspace/$2"; shift 2;;
+      --manifest)     manifest="/workspace/$2"; shift 2;;
+      --image)        scheduler_image="$2"; shift 2;;
+      --kubeconfig)   kubeconfig_path="/workspace/$2"; shift 2;;
       *) log "argumento desconocido: $1"; exit 2;;
     esac
   done
 
   [[ -n "$cluster_name" ]] || { log "--cluster-name es obligatorio"; exit 2; }
-  [[ -n "$manifest" ]] || { log "--manifest es obligatorio"; exit 2; }
+  [[ -n "$manifest" ]]     || { log "--manifest es obligatorio"; exit 2; }
 
   ensure_tools
 
@@ -114,10 +151,25 @@ scheduler_apply() {
   fi
 
   export KUBECONFIG="$kubeconfig_path"
-  log "Aplicando manifest de scheduler personalizado: $manifest"
+
+  # Load scheduler image into KIND if provided
+  if [[ -n "$scheduler_image" ]]; then
+    log "Cargando imagen del scheduler en KIND: $scheduler_image"
+    kind load docker-image "$scheduler_image" --name "$cluster_name"
+  fi
+
+  log "Aplicando manifest del scheduler: $manifest"
   kubectl apply -f "$manifest"
+
+  # Wait for the scheduler deployment to be ready
+  log "Esperando al deployment del scheduler (timeout 2m)..."
+  kubectl wait pod --all -n kube-system --for=condition=ready --timeout=120s \
+    -l component=drs-scheduler 2>/dev/null || \
+    log "El scheduler puede tardar unos segundos más en inicializarse."
+
   log "OK"
 }
+
 run_test() {
   local cluster_name=""
   local kubeconfig_path="/workspace/kubeconfig"
@@ -128,31 +180,28 @@ run_test() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --cluster-name) cluster_name="$2"; shift 2;;
-      --kubeconfig) kubeconfig_path="/workspace/$2"; shift 2;;
-      --test-config) test_config="/workspace/$2"; shift 2;;
-      --repeat) repeat="$2"; shift 2;;
+      --cluster-name)    cluster_name="$2"; shift 2;;
+      --kubeconfig)      kubeconfig_path="/workspace/$2"; shift 2;;
+      --test-config)     test_config="/workspace/$2"; shift 2;;
+      --repeat)          repeat="$2"; shift 2;;
       --timeout-seconds) timeout_seconds="$2"; shift 2;;
-      --verbose) verbose="true"; shift 1;;
-      --config-yaml) shift 2;; # solo para trazabilidad (no se usa)
+      --verbose)         verbose="true"; shift 1;;
+      --config-yaml)     shift 2;; # trazabilidad únicamente
       *) log "argumento desconocido: $1"; exit 2;;
     esac
   done
 
   [[ -n "$cluster_name" ]] || { log "--cluster-name es obligatorio"; exit 2; }
-  [[ -n "$test_config" ]] || { log "--test-config es obligatorio"; exit 2; }
+  [[ -n "$test_config" ]]  || { log "--test-config es obligatorio"; exit 2; }
 
-  ensure_tools
+  ensure_tools_test
 
   if [[ ! -f "$kubeconfig_path" ]]; then
     log "No existe kubeconfig en $kubeconfig_path. Ejecuta primero: ks-arena kind ..."
     exit 2
   fi
 
-  local cl_args=(--kubeconfig "$kubeconfig_path" --testconfig "$test_config")
-  if [[ -n "$timeout_seconds" ]]; then
-    cl_args+=(--timeout "${timeout_seconds}s")
-  fi
+  local cl_args=(--kubeconfig "$kubeconfig_path" --testconfig "$test_config" --provider=kind)
 
   log "Ejecutando ClusterLoader2 (repeat=$repeat)..."
   for i in $(seq 1 "$repeat"); do
@@ -168,17 +217,21 @@ run_test() {
 }
 
 case "$cmd" in
-  kind) kind_up "$@";;
-  down) kind_down "$@";;
+  kind)      kind_up "$@";;
+  down)      kind_down "$@";;
   scheduler) scheduler_apply "$@";;
-  test) run_test "$@";;
+  test)      run_test "$@";;
   ""|-h|--help|help)
     cat <<'EOF'
 ks-arena-runner (internal)
 
 Commands:
-  kind  --cluster-name NAME [--kind-config PATH] --terraform-dir DIR [--var k=v ...]
-  test  --cluster-name NAME [--kubeconfig PATH] --test-config PATH [--repeat N] [--timeout-seconds N] [--verbose]
+  kind       --cluster-name NAME [--kind-config PATH] [--terraform-dir DIR] [--var k=v ...]
+             [--image IMG ...] [--manifest PATH ...]
+  down       --cluster-name NAME
+  scheduler  --cluster-name NAME --manifest PATH [--image IMG] [--kubeconfig PATH]
+  test       --cluster-name NAME [--kubeconfig PATH] --test-config PATH [--repeat N]
+             [--timeout-seconds N] [--verbose]
 EOF
     ;;
   *)
@@ -186,4 +239,3 @@ EOF
     exit 2
     ;;
 esac
-

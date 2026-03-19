@@ -15,8 +15,11 @@ type RunOptions struct {
 	Args              []string
 	Privileged        bool
 	MountDockerSocket bool
-	Stdout            io.Writer
-	Stderr            io.Writer
+	// HostNetwork runs the container in the host network namespace so it can
+	// reach KIND API servers bound to 127.0.0.1 on the host.
+	HostNetwork bool
+	Stdout      io.Writer
+	Stderr      io.Writer
 }
 
 func Run(opts RunOptions) error {
@@ -37,6 +40,9 @@ func Run(opts RunOptions) error {
 	}
 	if opts.MountDockerSocket {
 		dockerArgs = append(dockerArgs, "-v", "/var/run/docker.sock:/var/run/docker.sock")
+	}
+	if opts.HostNetwork {
+		dockerArgs = append(dockerArgs, "--network=host")
 	}
 
 	dockerArgs = append(dockerArgs,

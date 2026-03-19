@@ -44,10 +44,11 @@ var schedulerCmd = &cobra.Command{
 			return fmt.Errorf("docker build del scheduler falló: %w", err)
 		}
 
-		// 2) Aplicar el manifest en el cluster KIND usando el runner (la imagen del scheduler ya está en el daemon de Docker del host).
+		// 2) Cargar la imagen en KIND y aplicar el manifest usando el runner.
 		runnerArgs := []string{
 			"scheduler",
 			"--cluster-name", cfg.ClusterName,
+			"--image", cfg.Image,
 			"--manifest", cfg.ManifestPath,
 		}
 		if cfg.KubeconfigPath != "" {
@@ -59,6 +60,7 @@ var schedulerCmd = &cobra.Command{
 			Workdir:           yamlDir,
 			Privileged:        true,
 			MountDockerSocket: true,
+			HostNetwork:       true,
 			Args:              runnerArgs,
 			Stdout:            os.Stdout,
 			Stderr:            os.Stderr,

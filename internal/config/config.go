@@ -7,12 +7,21 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// ImageSpec describes a Docker image to build and load into the KIND cluster.
+type ImageSpec struct {
+	Name       string `yaml:"name"`       // image tag, e.g. local/k8s-monitor:latest
+	Dockerfile string `yaml:"dockerfile"` // path relative to the config YAML file
+	Context    string `yaml:"context"`    // build context path relative to the config YAML file
+}
+
 // KindConfig representa el esquema mínimo para example.yaml (infraestructura KIND + Terraform).
 type KindConfig struct {
 	KindConfigPath string            `yaml:"kindConfigPath"`
 	ClusterName    string            `yaml:"clusterName"`
-	TerraformDir   string            `yaml:"terraformDir"`
+	TerraformDir   string            `yaml:"terraformDir,omitempty"`
 	Variables      map[string]string `yaml:"variables,omitempty"`
+	Images         []ImageSpec       `yaml:"images,omitempty"`
+	Manifests      []string          `yaml:"manifests,omitempty"`
 }
 
 // TestConfig representa el esquema mínimo para test-example.yaml (pruebas ClusterLoader2).
@@ -50,9 +59,6 @@ func LoadKindConfig(path string) (*KindConfig, error) {
 
 	if cfg.ClusterName == "" {
 		return nil, fmt.Errorf("clusterName es obligatorio")
-	}
-	if cfg.TerraformDir == "" {
-		return nil, fmt.Errorf("terraformDir es obligatorio")
 	}
 
 	return &cfg, nil

@@ -53,6 +53,7 @@ var testCmd = &cobra.Command{
 			Workdir:    yamlDir,
 			Privileged: true,
 			MountDockerSocket: true,
+			HostNetwork:       true,
 			Args:       runnerArgs,
 			Stdout:     os.Stdout,
 			Stderr:     os.Stderr,

@@ -2,7 +2,8 @@ FROM golang:1.25-bookworm AS runtime-builder
 
 WORKDIR /perf-src
 
-RUN git clone https://github.com/kubernetes/perf-tests.git . && \
+RUN mkdir -p /out && \
+    git clone --depth=1 https://github.com/kubernetes/perf-tests.git . && \
     cd clusterloader2 && \
     GOOS=linux GOARCH=amd64 go build -o /out/clusterloader2 ./cmd/clusterloader.go
 
@@ -22,11 +23,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /usr/local/bin
 
 # Install kubectl
-RUN curl -sSL -o kubectl https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl && \
+RUN curl -sSL -o kubectl https://dl.k8s.io/release/v1.32.0/bin/linux/amd64/kubectl && \
     chmod +x kubectl
 
-# Install KIND
-RUN curl -sSL -o kind https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64 && \
+# Install KIND v0.25.0 (supports Kubernetes v1.32, handles f2fs rootfs gracefully)
+RUN curl -sSL -o kind https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-amd64 && \
     chmod +x kind
 
 # Install Terraform

@@ -39,6 +39,7 @@ var downCmd = &cobra.Command{
 			Workdir:           yamlDir,
 			Privileged:        true,
 			MountDockerSocket: true,
+			HostNetwork:       true,
 			Args:              runnerArgs,
 			Stdout:            os.Stdout,
 			Stderr:            os.Stderr,
@@ -70,6 +71,7 @@ var resetCmd = &cobra.Command{
 			Workdir:           yamlDir,
 			Privileged:        true,
 			MountDockerSocket: true,
+			HostNetwork:       true,
 			Args: []string{
 				"down",
 				"--cluster-name", cfg.ClusterName,
@@ -84,14 +86,22 @@ var resetCmd = &cobra.Command{
 		runnerArgs := []string{
 			"kind",
 			"--cluster-name", cfg.ClusterName,
-			"--terraform-dir", cfg.TerraformDir,
 			"--config-yaml", yamlBase,
 		}
 		if cfg.KindConfigPath != "" {
 			runnerArgs = append(runnerArgs, "--kind-config", cfg.KindConfigPath)
 		}
-		for k, v := range cfg.Variables {
-			runnerArgs = append(runnerArgs, "--var", fmt.Sprintf("%s=%s", k, v))
+		if cfg.TerraformDir != "" {
+			runnerArgs = append(runnerArgs, "--terraform-dir", cfg.TerraformDir)
+			for k, v := range cfg.Variables {
+				runnerArgs = append(runnerArgs, "--var", fmt.Sprintf("%s=%s", k, v))
+			}
+		}
+		for _, img := range cfg.Images {
+			runnerArgs = append(runnerArgs, "--image", img.Name)
+		}
+		for _, manifest := range cfg.Manifests {
+			runnerArgs = append(runnerArgs, "--manifest", manifest)
 		}
 
 		return docker.Run(docker.RunOptions{
@@ -99,6 +109,7 @@ var resetCmd = &cobra.Command{
 			Workdir:           yamlDir,
 			Privileged:        true,
 			MountDockerSocket: true,
+			HostNetwork:       true,
 			Args:              runnerArgs,
 			Stdout:            os.Stdout,
 			Stderr:            os.Stderr,

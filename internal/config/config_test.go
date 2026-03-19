@@ -17,23 +17,26 @@ func writeTempYAML(t *testing.T, contents string) string {
 	return p
 }
 
-func TestLoadKindConfig_RequiresFields(t *testing.T) {
+func TestLoadKindConfig_RequiresClusterName(t *testing.T) {
 	p := writeTempYAML(t, `
 clusterName: ""
-terraformDir: ""
 `)
 	_, err := LoadKindConfig(p)
 	if err == nil || !strings.Contains(err.Error(), "clusterName es obligatorio") {
 		t.Fatalf("expected clusterName required error, got %v", err)
 	}
+}
 
-	p = writeTempYAML(t, `
+func TestLoadKindConfig_TerraformDirOptional(t *testing.T) {
+	p := writeTempYAML(t, `
 clusterName: c1
-terraformDir: ""
 `)
-	_, err = LoadKindConfig(p)
-	if err == nil || !strings.Contains(err.Error(), "terraformDir es obligatorio") {
-		t.Fatalf("expected terraformDir required error, got %v", err)
+	cfg, err := LoadKindConfig(p)
+	if err != nil {
+		t.Fatalf("expected no error when terraformDir is empty, got %v", err)
+	}
+	if cfg.TerraformDir != "" {
+		t.Fatalf("expected empty terraformDir, got %q", cfg.TerraformDir)
 	}
 }
 
@@ -45,6 +48,12 @@ terraformDir: terraform
 variables:
   a: "1"
   b: "two"
+images:
+  - name: local/foo:latest
+    dockerfile: foo/Dockerfile
+    context: foo
+manifests:
+  - manifests/app.yaml
 `)
 	cfg, err := LoadKindConfig(p)
 	if err != nil {
@@ -55,6 +64,12 @@ variables:
 	}
 	if cfg.Variables["a"] != "1" || cfg.Variables["b"] != "two" {
 		t.Fatalf("variables mismatch: %#v", cfg.Variables)
+	}
+	if len(cfg.Images) != 1 || cfg.Images[0].Name != "local/foo:latest" {
+		t.Fatalf("images mismatch: %#v", cfg.Images)
+	}
+	if len(cfg.Manifests) != 1 || cfg.Manifests[0] != "manifests/app.yaml" {
+		t.Fatalf("manifests mismatch: %#v", cfg.Manifests)
 	}
 }
 
