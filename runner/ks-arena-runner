@@ -170,6 +170,84 @@ scheduler_apply() {
   log "OK"
 }
 
+print_test_report() {
+  local kubeconfig_path="$1"
+  export KUBECONFIG="$kubeconfig_path"
+
+  log ""
+  log "======================================================="
+  log "                    TEST REPORT"
+  log "======================================================="
+  log ""
+
+  # Discover test namespaces created by CL2 (prefix drs-test-)
+  local test_namespaces
+  test_namespaces=$(kubectl get ns --no-headers 2>/dev/null \
+    | awk '$1 ~ /^drs-test-/ {print $1}') || true
+
+  if [[ -n "$test_namespaces" ]]; then
+    # Pod-to-node distribution
+    log "--- Pod distribution (scheduled by DRS) ---"
+    local pods_running=0 pods_total=0 node_col=7
+    while IFS= read -r ns; do
+      local rows
+      rows=$(kubectl get pods -n "$ns" -o wide --no-headers 2>/dev/null) || true
+      [[ -z "$rows" ]] && continue
+      local n_total n_running
+      n_total=$(echo "$rows" | wc -l | tr -d ' ')
+      n_running=$(echo "$rows" | awk '$3=="Running"{c++} END{print c+0}')
+      pods_total=$(( pods_total + n_total ))
+      pods_running=$(( pods_running + n_running ))
+      echo "$rows" | while IFS= read -r line; do
+        log "  [${ns}] $(echo "$line" | awk '{printf "%-42s  node=%-35s  status=%s\n",$1,$7,$3}')"
+      done
+    done <<< "$test_namespaces"
+
+    log ""
+    log "  Total pods: $pods_total  |  Running: $pods_running  |  Not running: $(( pods_total - pods_running ))"
+
+    log ""
+    log "--- Pods per node ---"
+    while IFS= read -r ns; do
+      kubectl get pods -n "$ns" -o wide --no-headers 2>/dev/null \
+        | awk '{print $7}' | sort | uniq -c \
+        | while read -r count node; do
+            log "  $node  →  $count pod(s)"
+          done
+    done <<< "$test_namespaces"
+
+    log ""
+    log "--- Scheduling events ---"
+    while IFS= read -r ns; do
+      kubectl get events -n "$ns" \
+        --field-selector reason=Scheduled \
+        --sort-by=.lastTimestamp \
+        --no-headers 2>/dev/null \
+        | while IFS= read -r line; do log "  $line"; done || true
+    done <<< "$test_namespaces"
+
+    log ""
+    # Cleanup test namespaces
+    log "Limpiando namespaces de prueba..."
+    while IFS= read -r ns; do
+      kubectl delete namespace "$ns" --ignore-not-found 2>/dev/null || true
+    done <<< "$test_namespaces"
+  else
+    log "  No test namespaces found."
+  fi
+
+  log ""
+  log "--- Collector DRS scoring calls ---"
+  local score_calls=0
+  score_calls=$(kubectl logs -n monitoring deploy/collector \
+    -c collector-agent 2>/dev/null \
+    | grep -c "\[GetNodeScores\]" || true)
+  log "  GetNodeScores invocations (lifetime): ${score_calls}"
+
+  log "======================================================="
+  log ""
+}
+
 run_test() {
   local cluster_name=""
   local kubeconfig_path="/workspace/kubeconfig"
@@ -201,7 +279,27 @@ run_test() {
     exit 2
   fi
 
-  local cl_args=(--kubeconfig "$kubeconfig_path" --testconfig "$test_config" --provider=kind)
+  export KUBECONFIG="$kubeconfig_path"
+
+  # Restart DRS scheduler so it is in a clean state (not in CrashLoopBackOff)
+  # The scheduler exits when its queue is empty (leaderElect=false), which builds
+  # up backoff between test runs. A rollout restart resets the crash counter.
+  if kubectl get deployment/drs-scheduler -n kube-system &>/dev/null; then
+    log "Reiniciando DRS scheduler (limpiando CrashLoopBackOff)..."
+    kubectl rollout restart deployment/drs-scheduler -n kube-system
+    kubectl wait pod -n kube-system -l component=drs-scheduler \
+      --for=condition=ready --timeout=120s 2>/dev/null || \
+      log "Advertencia: scheduler tardando en inicializarse, continuando..."
+    log "DRS scheduler listo."
+  fi
+
+  # Keep test namespaces alive after CL2 finishes so the report can inspect them.
+  # deleteAutomanagedNamespaces=false is set in the test config itself.
+  local cl_args=(
+    --kubeconfig "$kubeconfig_path"
+    --testconfig "$test_config"
+    --provider=kind
+  )
 
   log "Ejecutando ClusterLoader2 (repeat=$repeat)..."
   for i in $(seq 1 "$repeat"); do
@@ -211,6 +309,7 @@ run_test() {
     else
       clusterloader2 "${cl_args[@]}" 2>&1 | tee "/workspace/clusterloader2-run-${i}.log"
     fi
+    print_test_report "$kubeconfig_path"
   done
 
   log "OK"
